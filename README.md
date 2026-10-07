@@ -58,8 +58,11 @@ echo "OPENAI_API_KEY=your_openai_api_key" > .env
 `docs/` 폴더에 PDF 또는 TXT 문서를 넣은 후 실행합니다.
 
 ```bash
-python build_vector_db.py
+python build_vector_db.py            # 조문 단위로 청킹 후 임베딩
+python build_vector_db.py --dry-run  # 임베딩 없이 청킹 결과만 확인 (vector_db/chunks.jsonl)
 ```
+
+법령 PDF는 `제N조(제목)` 단위로 잘리며, 각 청크에 `[법령명 제N조(제목)]` 머리말과 메타데이터(법령명, 조문, 시행일)가 붙습니다. 임베딩 모델(`EMBEDDING_MODEL`, 기본 `text-embedding-3-large`)이나 청킹 방식을 바꾸면 벡터 DB를 다시 만들어야 합니다.
 
 ### 4. 서버 실행
 
@@ -94,6 +97,9 @@ curl -X POST http://localhost:8000/chat \
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "answer": "업무상 재해는 근로자가 업무상의 사유로...",
+  "sources": [
+    {"law": "산업재해보상보험법", "article": "제37조", "title": "업무상의 재해의 인정 기준", "source": "산업재해보상보험법(법률)(제21375호)(20260701).pdf"}
+  ],
   "turn": 1
 }
 ```
@@ -116,4 +122,4 @@ curl -X POST http://localhost:8000/chat \
 uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
-> 운영 환경에서는 세션 저장소를 Redis로 교체하고, CORS `allow_origins`를 실제 도메인으로 제한하는 것을 권장합니다.
+> 현재 세션은 프로세스 메모리에 저장되므로 `--workers`를 2 이상으로 띄우면 멀티턴 대화가 끊길 수 있습니다. 운영 환경에서는 세션 저장소를 Redis로 교체하고, CORS `allow_origins`를 실제 도메인으로 제한하는 것을 권장합니다.
