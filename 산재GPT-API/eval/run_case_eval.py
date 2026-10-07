@@ -22,12 +22,14 @@ from pydantic import BaseModel, Field
 
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(EVAL_DIR))
+sys.path.insert(0, EVAL_DIR)
 os.chdir(os.path.dirname(EVAL_DIR))  # main.py가 상대경로 vector_db를 읽는다
 
 from fastapi.testclient import TestClient  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
 import main  # noqa: E402
+from scoring import wilson  # noqa: E402
 
 
 class Lean(BaseModel):
@@ -84,8 +86,10 @@ def summarize(results: list[dict]) -> dict:
     return {
         "문항수": n,
         "정확도": sum(r["정답"] for r in results) / n,
+        "정확도_95CI": wilson(sum(r["정답"] for r in results), n),
         "판단률": len(decided) / n,
         "판단한_문항_정확도": (sum(r["정답"] for r in decided) / len(decided)) if decided else None,
+        "판단한_문항_정확도_95CI": wilson(sum(r["정답"] for r in decided), len(decided)),
         "평균_검색_판례수": sum(len(r["검색된_판례"]) for r in results) / n,
         "유출": sum(r["유출"] for r in results),
         "결론별": by_class,

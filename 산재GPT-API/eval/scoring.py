@@ -1,5 +1,6 @@
 """검색 채점 로직. run_eval.py(채점)와 compare.py(저장된 결과 재채점)가 함께 쓴다."""
 import re
+from math import sqrt
 
 REF = re.compile(r"(.+?)\s+(제\d+조(?:의\d+)?|별표\s*\d+(?:의\d+)?)$")
 
@@ -32,3 +33,12 @@ def score_retrieval(gold_raw: str, retrieved: list[tuple[str, str | None]]) -> t
         return None, None
     hits = [is_retrieved(g, retrieved) for g in gold]
     return any(hits), sum(hits) / len(hits)
+
+
+def wilson(k: int, n: int, z: float = 1.96) -> list[float] | None:
+    """비율의 95% 신뢰구간 (Wilson). 표본이 작을 때 정규근사보다 정확하다."""
+    if n == 0:
+        return None
+    p, d = k / n, 1 + z * z / n
+    center, margin = p + z * z / (2 * n), z * sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return [round((center - margin) / d, 3), round((center + margin) / d, 3)]

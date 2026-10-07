@@ -26,7 +26,7 @@ ROOT = os.path.dirname(EVAL_DIR)
 SUMMARY_PATH = os.path.join(ROOT, "precedents", "data", "summaries.jsonl")
 RAW_DIR = os.path.join(ROOT, "precedents", "data", "raw")
 OUT_PATH = os.path.join(EVAL_DIR, "case_holdout.csv")
-PER_CLASS = 20
+PER_CLASS = 100
 SEED = 42
 FACT_CHARS = 2000
 MIN_FACT_CHARS = 200
@@ -85,11 +85,15 @@ if __name__ == "__main__":
         picked += random.sample(candidates, PER_CLASS)
 
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    out = []
-    for i, row in enumerate(picked, 1):
+    bodies = []
+    for row in picked:
         with open(os.path.join(RAW_DIR, f"{row['판례일련번호']}.json"), encoding="utf-8") as f:
-            body = json.load(f)["판례내용"]
-        question = llm.invoke(PROMPT.format(facts=facts_section(body))).content.strip()
+            bodies.append(json.load(f)["판례내용"])
+    print(f"질문 {len(picked)}개 생성 중...", flush=True)
+    questions = llm.batch([PROMPT.format(facts=facts_section(b)) for b in bodies], config={"max_concurrency": 8})
+    out = []
+    for i, (row, body, answer) in enumerate(zip(picked, bodies, questions), 1):
+        question = answer.content.strip()
         out.append({
             "id": f"P{i:02d}",
             "판례일련번호": row["판례일련번호"],
@@ -99,7 +103,6 @@ if __name__ == "__main__":
             "실제결론": row["결론"],
             "질문": question,
         })
-        print(f"{i}/{len(picked)} {row['사건번호']} ({row['결론']})", flush=True)
 
     with open(OUT_PATH, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=out[0].keys())
