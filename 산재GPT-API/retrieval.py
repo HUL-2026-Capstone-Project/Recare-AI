@@ -165,3 +165,52 @@ class LawRetriever(BaseRetriever):
         extra = [await self.vectordb.asimilarity_search(q, **self._search_kwargs())
                  for q in getattr(routed, "queries", [])]
         return self._merge(query_vector, routed, extra)
+
+
+FAVORABLE = ("인정", "일부 인정")
+
+
+class CombinedRetriever(BaseRetriever):
+    """법령 K개 + 판례 K개를 따로 검색해 합친다 (법령이 앞).
+
+    판례는 벡터 검색 순위에, 이번에 검색된 조문을 참조하는 판례의 순위를 RRF로 더해
+    질문과 같은 쟁점(같은 조문)을 다룬 판례가 위로 오게 한다.
+
+    precedent_mode
+      top      : 순위대로 K개
+      balanced : 인정 쪽 K/2개 + 불인정 쪽 K/2개. 판례 DB의 약 70%가 불인정 판결이라
+                 순위대로 뽑으면 답변이 불인정 쪽으로 끌려간다. 양쪽을 함께 보여주고
+                 결과를 가른 요소를 비교하게 한다.
+    """
+    law_retriever: LawRetriever
+    precedent_db: FAISS | None = None
+    precedent_k: int = 3
+    precedent_fetch_k: int = 20
+    precedent_mode: str = "top"
+
+    def _rank_precedents(self, candidates: list[Document], law_docs: list[Document]) -> list[Document]:
+        law_refs = {f"{d.metadata.get('law')} {d.metadata.get('article')}" for d in law_docs}
+        linked = [d for d in candidates if law_refs & set(d.metadata.get("관련조문", []))]
+        ranked = fuse([candidates, linked], len(candidates))
+        if self.precedent_mode != "balanced":
+            return ranked[:self.precedent_k]
+        half = max(1, self.precedent_k // 2)
+        favorable = [d for d in ranked if d.metadata.get("결론") in FAVORABLE][:half]
+        unfavorable = [d for d in ranked if d.metadata.get("결론") == "불인정"][:half]
+        return favorable + unfavorable
+
+    def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
+        law_docs = self.law_retriever.invoke(query)
+        if not self.precedent_db or self.precedent_k == 0:
+            return law_docs
+        candidates = self.precedent_db.similarity_search(query, k=self.precedent_fetch_k)
+        return law_docs + self._rank_precedents(candidates, law_docs)
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        law_docs = await self.law_retriever.ainvoke(query)
+        if not self.precedent_db or self.precedent_k == 0:
+            return law_docs
+        candidates = await self.precedent_db.asimilarity_search(query, k=self.precedent_fetch_k)
+        return law_docs + self._rank_precedents(candidates, law_docs)

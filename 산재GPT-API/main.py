@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from dotenv import load_dotenv
 import os
+import re
 import uuid
 
 from langchain_community.vectorstores import FAISS
@@ -11,7 +12,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 from langchain_core.prompts import PromptTemplate
 
-from retrieval import LawRetriever
+from retrieval import CombinedRetriever, LawRetriever
 
 load_dotenv()
 if not os.getenv("OPENAI_API_KEY"):
@@ -26,23 +27,36 @@ FETCH_K = int(os.getenv("FETCH_K", "20"))
 ROUTING = os.getenv("ROUTING", "toc")  # none | query | toc (retrieval.py 참고)
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", "gpt-4o")
 EXCLUDE_LAWS = [x for x in os.getenv("EXCLUDE_LAWS", "").split(",") if x]
+PRECEDENT_K = int(os.getenv("PRECEDENT_K", "4"))  # 0이면 판례를 쓰지 않는다
+PRECEDENT_MODE = os.getenv("PRECEDENT_MODE", "balanced")  # top | balanced (retrieval.py 참고)
+PRECEDENT_FETCH_K = int(os.getenv("PRECEDENT_FETCH_K", "40"))
+PRECEDENT_DB_PATH = "vector_db_prec"
 FALLBACK_ANSWER = "관련 규정을 문서에서 찾을 수 없습니다. 근로복지공단(1588-0075) 또는 전문 노무사에게 문의하세요."
 
 SYSTEM_PROMPT = """
 당신은 산업재해보상보험법(산재보험법) 전문 AI 어시스턴트입니다.
-주어진 문서(산재보험법, 시행령, 시행규칙 등)를 기반으로만 답변하세요.
+주어진 문서(산재보험법·시행령·시행규칙·고시 조문과 판례)를 기반으로만 답변하세요.
 
 답변 형식:
-1. 질문에 직접 답변
-2. 해당 근거 조문 또는 기준 명시 (각 문서 첫 줄의 [법령명 제○조(제목)] 표기를 그대로 사용)
-3. 필요 시 실무 절차 안내
+1. 질문에 대한 결론. 원칙과 예외가 있으면 둘 다 말하세요.
+2. 근거 조문 (각 문서 첫 줄의 [법령명 제○조(제목)] 표기를 그대로 사용)
+3. 유사 판례 ([판례 ...] 문서가 있고 질문과 사실관계·쟁점이 비슷할 때만)
+   - 사건번호, 결론(인정/불인정 등), 질문과 비슷한 점을 한 줄로
+   - 인정된 판례와 불인정된 판례가 함께 있으면 무엇이 결과를 갈랐는지(업무시간, 기저질환,
+     퇴행성 여부, 사고 경위 등) 비교하고, 질문 사안이 어느 쪽에 더 가까운지 말하기
+   - 판례는 개별 사안의 사실관계에 따라 결과가 달라질 수 있다고 안내
+   - 선고 연도가 오래된 판례는 이후 법령 개정으로 기준이 달라졌을 수 있다고 밝히기
+4. 필요 시 실무 절차 안내
 
 주의사항:
 - 문서에 없는 내용은 '관련 규정을 찾지 못했습니다'라고 명확히 안내하세요.
 - 법적 판단이 필요한 사안은 반드시 '근로복지공단 또는 전문 노무사 상담을 권장합니다'를 덧붙이세요.
-- 문서에 없는 조문 번호를 만들어내지 마세요.
+- 문서에 없는 조문 번호나 사건번호를 만들어내지 마세요.
 - 답변은 항상 한국어로 작성하세요.
 """
+
+# 사건번호 형식: 2019두44330, 2023구단64112, 2021누31087 등
+CASE_NUMBER = re.compile(r"\b(?:19|20)\d{2}[가-힣]{1,3}\d{2,6}\b")
 
 # 시스템 프롬프트는 답변 생성 단계에만 넣는다 (질문에 붙이면 검색어가 오염된다)
 QA_PROMPT = PromptTemplate.from_template(
@@ -80,13 +94,27 @@ vectordb = FAISS.load_local(
     allow_dangerous_deserialization=True,
 )
 llm = ChatOpenAI(model="gpt-4o", temperature=0)
-retriever = LawRetriever(
+law_retriever = LawRetriever(
     vectordb=vectordb,
     routing=ROUTING,
     router_llm=ChatOpenAI(model=ROUTER_MODEL, temperature=0),
     k=RETRIEVAL_K,
     fetch_k=FETCH_K,
     exclude_laws=EXCLUDE_LAWS,
+)
+precedent_db = None
+if PRECEDENT_K and os.path.exists(PRECEDENT_DB_PATH):
+    precedent_db = FAISS.load_local(
+        PRECEDENT_DB_PATH,
+        OpenAIEmbeddings(model=EMBEDDING_MODEL),
+        allow_dangerous_deserialization=True,
+    )
+retriever = CombinedRetriever(
+    law_retriever=law_retriever,
+    precedent_db=precedent_db,
+    precedent_k=PRECEDENT_K,
+    precedent_fetch_k=PRECEDENT_FETCH_K,
+    precedent_mode=PRECEDENT_MODE,
 )
 qa_chain = ConversationalRetrievalChain.from_llm(
     llm=llm,
@@ -115,9 +143,9 @@ class ChatRequest(BaseModel):
 
 
 class Source(BaseModel):
-    law: Optional[str] = Field(default=None, description="법령명")
-    article: Optional[str] = Field(default=None, description="조문 번호 (예: 제37조)")
-    title: Optional[str] = Field(default=None, description="조문 제목")
+    law: Optional[str] = Field(default=None, description="법령명. 판례는 '판례'")
+    article: Optional[str] = Field(default=None, description="조문 번호 (예: 제37조). 판례는 사건번호")
+    title: Optional[str] = Field(default=None, description="조문 제목. 판례는 '법원 사건번호 사건명 (결론)'")
     source: Optional[str] = Field(default=None, description="원본 파일명")
 
 
@@ -160,6 +188,11 @@ async def chat(req: ChatRequest):
 
     if not answer:
         answer = FALLBACK_ANSWER
+
+    # 검색된 판례에 없는 사건번호는 지어낸 것으로 보고 가린다
+    known_cases = {d.metadata["article"] for d in result.get("source_documents", [])
+                   if d.metadata.get("law") == "판례"}
+    answer = CASE_NUMBER.sub(lambda m: m.group() if m.group() in known_cases else "(확인되지 않은 판례)", answer)
 
     # 같은 조문이 여러 청크로 나뉘어 검색될 수 있으므로 중복 제거
     sources, seen = [], set()
