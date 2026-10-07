@@ -266,7 +266,9 @@ async def chat_stream(req: ChatRequest):
         except Exception as e:
             yield sse("error", {"detail": f"AI 처리 중 오류 발생: {e}"})
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    # nginx는 기본적으로 응답을 모아서 보내므로 버퍼링을 끄라고 알려야 스트리밍이 된다
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
 
 
 @app.get(

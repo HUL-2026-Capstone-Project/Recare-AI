@@ -140,9 +140,34 @@ curl -X POST http://localhost:8000/chat \
 
 ## 배포
 
-```bash
-# 운영 환경 실행
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+운영 주소: **https://recareai.hwangs.site** (Swagger: `/docs`)
+
+OCI 서버(ARM)의 공용 nginx 뒤에 `recare-ai` compose 프로젝트(`api` + `redis`)로 떠 있습니다.
+**main에 push하면 GitHub Actions(`.github/workflows/deploy.yml`)가 자동 배포**합니다.
+
+```
+main push → rsync로 서버 ~/recare-ai/ 에 전송 (.env, 벡터 DB 제외)
+          → docker compose -p recare-ai up -d --build
+          → 새 이미지로 떴는지 + healthy 확인 → nginx reload → https://recareai.hwangs.site/health 확인
 ```
 
-> `REDIS_URL`이 없으면 세션이 프로세스 메모리에 저장되어 `--workers`를 2 이상으로 띄울 때 멀티턴 대화가 끊깁니다. 운영 환경에서는 `REDIS_URL`을 설정하세요 (세션은 마지막 대화 후 7일 보관, 세션당 최근 50턴). CORS `allow_origins`도 실제 도메인으로 제한하는 것을 권장합니다.
+- 저장소 Secrets: `DEPLOY_HOST`, `DEPLOY_SSH_KEY`(배포 전용 키), `DEPLOY_KNOWN_HOSTS`
+- 서버에만 있는 것: `~/recare-ai/.env`(OPENAI_API_KEY), `~/recare-ai/vector_db/`, `~/recare-ai/vector_db_prec/`
+- nginx 설정: `~/sott/nyyb-server/nginx/conf.d/recareai.conf` (`/chat/stream`은 버퍼링 off)
+- 인증서: `~/nova/renew-cert.sh`가 매일 03:30 자동 갱신
+
+### 법령·판례 데이터 갱신
+
+벡터 DB는 CI가 만들지 않습니다 (판례 수집·요약에 20분 이상, 비용 발생). 로컬에서 다시 만든 뒤 서버로 올리고 재시작합니다.
+
+```bash
+K="<배포 SSH 키 경로>"
+rsync -az -e "ssh -i $K" 산재GPT-API/vector_db 산재GPT-API/vector_db_prec ubuntu@<서버>:~/recare-ai/
+ssh -i "$K" ubuntu@<서버> 'cd ~/recare-ai && sudo docker compose -p recare-ai restart api'
+```
+
+### 주의 (공용 서버)
+
+- 반드시 `-p recare-ai`로 프로젝트 이름을 지정합니다. **`--remove-orphans`를 절대 붙이지 마세요.** 공용 nginx가 내려가 다른 서비스가 죽습니다.
+- 포트를 외부에 공개하지 않습니다. 외부 네트워크 `web`에 붙어 nginx가 `recare-ai-api:8000`으로 프록시합니다.
+- 세션은 전용 Redis 컨테이너에 저장됩니다 (마지막 대화 후 7일, 세션당 최근 50턴).

@@ -1,0 +1,83 @@
+# main에 push되면 산재GPT-API를 OCI 서버에 배포한다.
+#
+# 서버에서 git clone이 막혀 있어(조직 정책) 러너에서 rsync로 소스를 밀어넣고 서버에서 빌드한다.
+# 벡터 DB(vector_db, vector_db_prec)와 .env는 서버에만 있고 rsync에서 제외된다.
+#
+# 필요한 저장소 Secrets
+#   DEPLOY_HOST         서버 IP
+#   DEPLOY_SSH_KEY      배포 전용 SSH 개인키 (공개키는 서버 ~/.ssh/authorized_keys에 등록)
+#   DEPLOY_KNOWN_HOSTS  ssh-keyscan으로 얻은 서버 호스트 키 (중간자 공격 방지)
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "산재GPT-API/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false  # 배포 도중에 끊기면 서버가 어중간한 상태로 남는다
+
+env:
+  REMOTE_DIR: recare-ai
+  PROJECT: recare-ai           # docker compose -p. 다른 스택과 겹치면 안 된다
+  HEALTH_URL: https://recareai.hwangs.site/health
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH 설정
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: 소스 전송 (rsync)
+        # .env, 벡터 DB는 반드시 제외 (--delete와 함께라 빼먹으면 서버 쪽 파일이 지워진다)
+        run: |
+          rsync -az --delete \
+            --exclude '.env' --exclude '.env.*' \
+            --exclude 'vector_db/' --exclude 'vector_db_prec/' \
+            --exclude 'precedents/data/' --exclude '.cache/' \
+            --exclude 'docs/' --exclude 'eval/' --exclude '__pycache__/' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./산재GPT-API/ "ubuntu@${{ secrets.DEPLOY_HOST }}:~/${REMOTE_DIR}/"
+
+      - name: 빌드 및 재기동
+        # --remove-orphans 를 절대 붙이지 말 것 (공용 nginx가 내려가 다른 서비스가 죽는다)
+        run: |
+          ssh -i ~/.ssh/deploy_key "ubuntu@${{ secrets.DEPLOY_HOST }}" bash -s <<EOF
+          set -euo pipefail
+          cd ~/${REMOTE_DIR}
+          test -f .env && test -d vector_db && test -d vector_db_prec
+          sudo docker compose -p ${PROJECT} up -d --build
+
+          # 방금 만든 이미지로 떠 있는지 확인 (--build 누락으로 예전 이미지가 도는 사고 방지)
+          [ "\$(sudo docker inspect ${PROJECT}-api-1 --format '{{.Image}}')" = \
+            "\$(sudo docker image inspect ${PROJECT}-api --format '{{.Id}}')" ]
+
+          for i in \$(seq 1 30); do
+            [ "\$(sudo docker inspect ${PROJECT}-api-1 --format '{{.State.Health.Status}}')" = healthy ] && break
+            sleep 5
+          done
+          [ "\$(sudo docker inspect ${PROJECT}-api-1 --format '{{.State.Health.Status}}')" = healthy ]
+
+          # 재기동하면 컨테이너 IP가 바뀌어 nginx가 502를 낸다
+          sudo docker exec nyyb-server-nginx-1 nginx -s reload
+          EOF
+
+      - name: 외부 헬스 체크
+        run: |
+          for i in $(seq 1 10); do
+            curl -fsS "$HEALTH_URL" && exit 0
+            sleep 5
+          done
+          exit 1
