@@ -2,7 +2,8 @@
 판례 요약(precedents/data/summaries.jsonl)으로 판례 전용 벡터 DB를 만든다 → vector_db_prec/
 
   cd 산재GPT-API
-  python precedents/build_index.py
+  python precedents/build_index.py                    # 서비스용: 판례 전부
+  python precedents/build_index.py --exclude-holdout  # 사례 결론 예측 실험용: 시험 판례 제외
 
 법령 벡터 DB와 따로 두는 이유: 판례가 법령 조각보다 훨씬 많아 한 인덱스에 섞으면
 조문이 검색 결과에서 밀려난다. 검색할 때 법령 K개 + 판례 K개를 따로 뽑아 합친다.
@@ -24,7 +25,7 @@ SUMMARY_PATH = os.path.join(HERE, "data", "summaries.jsonl")
 RAW_DIR = os.path.join(HERE, "data", "raw")
 DB_PATH = os.path.join(ROOT, "vector_db_prec")
 HOLDING_CHARS = 800  # 대법원 판결요지는 법리 설명이라 일부를 함께 넣는다
-# 사례 결론 예측 실험(eval/make_case_holdout.py)의 시험 판례. 정답이 새지 않게 DB에서 뺀다
+# 사례 결론 예측 실험(eval/make_case_holdout.py)의 시험 판례. --exclude-holdout일 때 정답이 새지 않게 뺀다
 HOLDOUT_PATH = os.path.join(ROOT, "eval", "case_holdout.csv")
 
 load_dotenv(os.path.join(ROOT, ".env"))
@@ -89,7 +90,7 @@ def load_holdout() -> tuple[set[str], set[str]]:
 if __name__ == "__main__":
     with open(SUMMARY_PATH, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f]
-    holdout_ids, holdout_cases = load_holdout()
+    holdout_ids, holdout_cases = load_holdout() if "--exclude-holdout" in sys.argv else (set(), set())
     docs, excluded = [], 0
     for row in rows:
         with open(os.path.join(RAW_DIR, f"{row['판례일련번호']}.json"), encoding="utf-8") as f:

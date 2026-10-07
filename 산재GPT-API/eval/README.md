@@ -33,6 +33,7 @@
 3. `run_case_eval.py`: 질문을 보내고, 답변이 인정/불인정/중립 중 어느 쪽으로 기우는지 GPT-4o로 판정해 실제 결론과 비교합니다.
 
 ```bash
+python precedents/build_index.py --exclude-holdout                 # 먼저 시험 판례를 뺀 판례 DB로 다시 만든다
 PRECEDENT_K=0 python eval/run_case_eval.py --label case_no_prec    # 판례 없이
 PRECEDENT_K=3 python eval/run_case_eval.py --label case_with_prec  # 판례 포함
 ```
