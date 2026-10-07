@@ -9,3 +9,6 @@ faiss-cpu
 pypdf
 python-dotenv
 pydantic
+httpx
+redis
+numpy
