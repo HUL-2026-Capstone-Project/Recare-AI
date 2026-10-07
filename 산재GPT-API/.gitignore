@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+precedents/data/
+vector_db_prec/
+.cache/

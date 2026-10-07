@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+vector_db/
+vector_db_prec/
+precedents/
+eval/
+docs/
+.cache/
+__pycache__/
+*.pyc
+.venv/
+venv/

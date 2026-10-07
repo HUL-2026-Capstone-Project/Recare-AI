@@ -1,0 +1,42 @@
+# 배포: sudo docker compose -p recare-ai up -d --build
+#
+# 주의 (서버 인수인계 문서 참고)
+# - 반드시 -p recare-ai 로 프로젝트 이름을 지정한다. 기본 이름이 다른 스택과 겹치면 orphan 경고가 뜨는데,
+#   --remove-orphans 를 붙이면 공용 nginx까지 내려가 다른 서비스가 죽는다. 절대 붙이지 말 것.
+# - 포트를 공개하지 않는다. 외부 네트워크 web에 붙어 있는 공용 nginx가 recare-ai-api:8000 으로 프록시한다.
+services:
+  api:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      # 벡터 DB는 이미지 밖에 둔다. 법령·판례를 갱신할 때 이 폴더만 바꾸고 컨테이너를 재시작한다
+      - ./vector_db:/app/vector_db:ro
+      - ./vector_db_prec:/app/vector_db_prec:ro
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      default:
+      web:
+        aliases:
+          - recare-ai-api
+
+  redis:
+    image: redis:7-alpine
+    # 대화 세션 저장용. 재시작해도 세션이 남도록 AOF로 디스크에 쓴다.
+    # 세션 키는 모두 TTL(7일)이 있어 메모리가 차면 만료 예정 키부터 지운다
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy volatile-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - default
+
+networks:
+  web:
+    external: true
+
+volumes:
+  redis-data:
