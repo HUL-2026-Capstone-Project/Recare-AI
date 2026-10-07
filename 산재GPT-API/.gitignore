@@ -6,3 +6,4 @@ __pycache__/
 venv/
 precedents/data/
 vector_db_prec/
+.cache/

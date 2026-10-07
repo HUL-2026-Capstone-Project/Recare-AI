@@ -6,10 +6,11 @@ docs/ 폴더의 법령 문서를 조문 단위로 잘라 FAISS 벡터 DB를 만�
 """
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from pypdf import PdfReader
 from dotenv import load_dotenv
+import hashlib
 import json
 import os
 import re
@@ -112,6 +113,51 @@ def restore_structure(text: str) -> str:
     return re.sub(r"(?<=[가-힣)])(\d{1,2})\.(?=[가-힣])", r"\n\1.", text)
 
 
+SPACING_CACHE = ".cache/annex_spacing.json"
+SPACING_PROMPT = """다음은 표에서 추출되면서 띄어쓰기가 모두 사라진 한국어 법령 별표입니다.
+한국어 맞춤법에 맞게 띄어쓰기만 넣으세요. 글자·숫자·기호·줄바꿈은 하나도 바꾸거나 빼거나 더하지 마세요.
+설명 없이 결과만 출력하세요.
+
+{text}"""
+
+
+def respace(text: str) -> str:
+    """띄어쓰기가 사라진 별표에 LLM으로 띄어쓰기를 되살린다.
+
+    모델이 내용을 바꾸면 안 되므로(장해등급표는 숫자 하나도 중요), 결과에서 공백을 모두 지웠을 때
+    원문과 같을 때만 받아들이고 아니면 원문을 쓴다. 결과는 캐시해 재빌드 때 다시 호출하지 않는다.
+    --dry-run에서는 캐시만 쓴다.
+    """
+    cache = {}
+    if os.path.exists(SPACING_CACHE):
+        with open(SPACING_CACHE, encoding="utf-8") as f:
+            cache = json.load(f)
+    # 줄 단위로 1500자 이하 조각을 만들어 보낸다 (길면 모델이 내용을 빠뜨리기 쉽다)
+    pieces, current = [], ""
+    for line in text.split("\n"):
+        if current and len(current) + len(line) > 1500:
+            pieces.append(current)
+            current = ""
+        current += line + "\n"
+    pieces.append(current)
+
+    keys = [hashlib.sha1(p.encode()).hexdigest() for p in pieces]
+    todo = [(k, p) for k, p in zip(keys, pieces) if k not in cache]
+    if todo and "--dry-run" not in sys.argv:
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        outputs = llm.batch([SPACING_PROMPT.format(text=p) for _, p in todo], config={"max_concurrency": 8})
+        for (key, piece), out in zip(todo, outputs):
+            spaced = out.content.strip("\n") + "\n"
+            same = re.sub(r"\s", "", spaced) == re.sub(r"\s", "", piece)
+            cache[key] = spaced if same else piece
+            if not same:
+                print(f"  ⚠️ 띄어쓰기 복원 중 내용이 바뀌어 원문 유지: {piece[:30]!r}")
+        os.makedirs(os.path.dirname(SPACING_CACHE), exist_ok=True)
+        with open(SPACING_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    return "".join(cache.get(k, p) for k, p in zip(keys, pieces))
+
+
 def split_annexes(text: str, law: str, base_meta: dict) -> list[Document]:
     """시행령 PDF 끝에 붙은 별표 본문을 별표 단위로 자른다. 별표가 없으면 빈 목록."""
     heads = list(ANNEX_HEAD.finditer(text))
@@ -125,7 +171,10 @@ def split_annexes(text: str, law: str, base_meta: dict) -> list[Document]:
         number = head.group(1)
         title = titles.get(number, "")
         article = f"별표 {number}"
-        body = restore_structure(re.sub(r"<[^>]*>", "", text[head.end():end]))
+        raw = re.sub(r"<[^>]*>", "", text[head.end():end])
+        body = restore_structure(raw)
+        if raw.count(" ") / max(len(raw), 1) < 0.05:  # 표에서 추출돼 띄어쓰기가 사라진 별표
+            body = respace(body)
         label = f"[{law} {article}({title})]" if title else f"[{law} {article}]"
         meta = {**base_meta, "article": article, "title": title}
         docs += [Document(page_content=f"{label}\n{chunk}", metadata=meta)
