@@ -99,10 +99,15 @@ def summarize(results: list[dict]) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", required=True)
+    parser.add_argument("--limit", type=int, help="앞에서부터 N건만 (인정·불인정이 섞이도록 고르게 뽑음)")
     args = parser.parse_args()
 
     with open(os.path.join(EVAL_DIR, "case_holdout.csv"), encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
+    if args.limit:
+        pos = [r for r in rows if r["실제결론"] == "인정"][:args.limit // 2]
+        neg = [r for r in rows if r["실제결론"] == "불인정"][:args.limit - len(pos)]
+        rows = pos + neg
 
     results = []
     with TestClient(main.app) as client:
